@@ -1,6 +1,6 @@
-#!/usr/bin/env -S python3 -u
+#!/usr/bin/env python3
 
-import argparse, socket, time, json, select, struct, sys, math
+import argparse, socket, time, json, select, struct, sys, math, hashlib
 
 class Receiver:
     def __init__(self):
@@ -12,42 +12,72 @@ class Receiver:
         self.remote_host = None
         self.remote_port = None
 
+        self.sequence_number = 0
         self.window = {}
-        self.send_sequence_number = 0
-        self.recv_sequence_number = 100
-
+        self.queue = []
+        
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.remote_host, self.remote_port))
 
     def log(self, message):
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
+    
+    # Return True if the message has the same checksum as given data
+    # Return False otherwise
+    def checkSum(self, msg):
+        return msg["checksum"] == hashlib.md5(msg["data"].encode('utf-8')).hexdigest()
+
+    # Check the queue and delete corresponding item in window
+    def clearQueue(self):
+        for item in self.queue:
+            del self.window[item]
+        self.queue.clear()
+
+    # Sort the window and check if the any key is matching the sequence number
+    # If yes, add to the queue for later
+    def checkWindow(self, msg):
+        # Sort the items of the dictionary by their keys
+        sorted_window = {}
+        for key, value in sorted(self.window.items()):
+            sorted_window[key] = value
+        self.window = sorted_window
+
+        # add entry in the window to queue if matching sequence number
+        for key, value in self.window.items():
+            if key == self.sequence_number:
+                # Print out the data to stdout 
+                print(value["data"], end='', flush=True)
+                self.sequence_number += 1
+                self.queue.append(key)
+                self.log("Received message %s" % msg)
 
     def run(self):
         while True:
             socks = select.select([self.socket], [], [])[0]
             for conn in socks:
                 data, addr = conn.recvfrom(65535)
-
-                # Grab the remote host/port if we don't alreadt have it
+                # Grab the remote host/port if we don't already have it
                 if self.remote_host is None:
                     self.remote_host = addr[0]
                     self.remote_port = addr[1]
+                # Wrap this around a try catch for error skip
+                try:
+                    msg = json.loads(data.decode('utf-8'))
+                    # check for corrupted packet by checksum
+                    if self.checkSum(msg):
+                        if msg['num'] not in self.window.keys():
+                            self.window[msg['num']] = msg
 
-                msg = json.loads(data.decode('utf-8'))
-                self.log("Received data message %s" % msg)
-                # Print out the data to stdout
-                if (msg['snum'] not in self.window):
-                    print(msg["data"], end='', flush=True)
-                    self.send_sequence_number = msg['snum']
-                    self.window[msg['snum']] = msg 
-                    self.recv_sequence_number += 1
-                    # Always send back an ack
-                    self.send({ "type": "ack",'rnum':self.recv_sequence_number, 'snum':self.send_sequence_number })
-                else:
-                    self.log("Snum is already in wnd")
-                    self.log('Dup num %s' % (msg['snum']))
+                        # Send back an ack after receiving the packet
+                        self.send({"type": "ack", "num": msg["num"], "time": msg["time"], "checksum": msg["checksum"]})
+                        self.checkWindow(msg)
+                        self.clearQueue() 
+                except:
+                    continue
+
         return
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='receive data')
     args = parser.parse_args()
